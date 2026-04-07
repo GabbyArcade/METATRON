@@ -6,9 +6,14 @@ Also fetches and extracts plain text from URLs.
 Used by LLM tool dispatch when AI writes [SEARCH: query]
 """
 
+import re
 import requests
 from bs4 import BeautifulSoup
-from ddgs import DDGS   # pip install duckduckgo-search
+
+try:
+    from ddgs import DDGS
+except ImportError:
+    from duckduckgo_search import DDGS
 
 
 # ─────────────────────────────────────────────
@@ -19,7 +24,6 @@ def web_search(query: str, max_results: int = 5) -> str:
     """
     Search DuckDuckGo and return formatted results.
     No API key. No rate limit issues for reasonable usage.
-    Returns a string ready to paste into LLM prompt.
     """
     print(f"  [*] Searching: {query}")
     try:
@@ -53,10 +57,8 @@ def search_cve(cve_id: str) -> str:
     """
     print(f"  [*] Looking up {cve_id}...")
 
-    # DDG search first
     ddg_results = web_search(f"{cve_id} vulnerability exploit details", max_results=3)
 
-    # Direct MITRE fetch
     mitre_url = f"https://cve.mitre.org/cgi-bin/cvename.cgi?name={cve_id}"
     mitre_data = fetch_page(mitre_url, max_chars=2000)
 
@@ -64,18 +66,13 @@ def search_cve(cve_id: str) -> str:
 
 
 def search_exploit(service: str, version: str) -> str:
-    """
-    Search for known exploits for a service + version combo.
-    e.g. search_exploit("apache", "2.4.49")
-    """
-    query = f"{service} {version} exploit CVE vulnerability 2023 2024"
+    """Search for known exploits for a service + version combo."""
+    query = f"{service} {version} exploit CVE vulnerability 2024 2025"
     return web_search(query, max_results=5)
 
 
 def search_fix(vuln_name: str) -> str:
-    """
-    Search for mitigation/fix for a vulnerability.
-    """
+    """Search for mitigation/fix for a vulnerability."""
     query = f"how to fix {vuln_name} security mitigation patch"
     return web_search(query, max_results=3)
 
@@ -96,13 +93,10 @@ def fetch_page(url: str, max_chars: int = 3000) -> str:
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # remove nav/footer/script noise
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
 
         text = soup.get_text(separator="\n", strip=True)
-
-        # collapse blank lines
         lines = [l for l in text.splitlines() if l.strip()]
         clean = "\n".join(lines)
 
@@ -132,8 +126,7 @@ def handle_search_dispatch(query: str) -> str:
     """
     query = query.strip()
 
-    # CVE pattern — CVE-YYYY-NNNNN
-    import re
+    # CVE pattern
     cve_pattern = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)
     cve_match = cve_pattern.search(query)
     if cve_match:
@@ -165,11 +158,9 @@ if __name__ == "__main__":
     if choice == "1":
         q = input("Query: ").strip()
         print(web_search(q))
-
     elif choice == "2":
         cve = input("CVE ID (e.g. CVE-2021-44228): ").strip()
         print(search_cve(cve))
-
     elif choice == "3":
         url = input("URL: ").strip()
         print(fetch_page(url))

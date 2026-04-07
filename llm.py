@@ -1,33 +1,31 @@
 #!/usr/bin/env python3
 """
 METATRON - llm.py
-Ollama interface for metatron-qwen model.
+Anthropic Claude API interface (with Ollama fallback).
 Builds prompts, handles AI responses, runs tool dispatch loop.
-Model: metatron-qwen (fine-tuned from huihui_ai/qwen3.5-abliterated:9b)
 """
 
 import re
-import requests
 import json
-from tools import run_tool_by_command, run_nmap, run_curl_headers
+from config import (
+    ANTHROPIC_API_KEY, CLAUDE_MODEL, MAX_TOKENS, TEMPERATURE,
+    USE_OLLAMA, OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT,
+    MAX_TOOL_LOOPS
+)
+from tools import run_tool_by_command
 from search import handle_search_dispatch
 
-OLLAMA_URL  = "http://localhost:11434/api/generate"
-MODEL_NAME  = "metatron-qwen"
-MAX_TOKENS  = 4096
-MAX_TOOL_LOOPS = 9   # max times AI can call tools per session
-OLLAMA_TIMEOUT = 600 
 
 # ─────────────────────────────────────────────
 # SYSTEM PROMPT
 # ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are METATRON, an elite AI penetration testing assistant running on Parrot OS.
+SYSTEM_PROMPT = """You are METATRON, an elite AI penetration testing assistant.
 You are precise, technical, and direct. No fluff.
 
 You have access to real tools. To use them, write tags in your response:
 
-  [TOOL: nmap -sV 192.168.1.1]       → runs nmap or any CLI tool
+  [TOOL: nmap -sV 192.168.1.1]       → runs nmap or any whitelisted CLI tool
   [SEARCH: CVE-2021-44228 exploit]   → searches the web via DuckDuckGo
 
 Rules:
@@ -56,28 +54,72 @@ SUMMARY: <2-3 sentence overall summary>
 
 
 # ─────────────────────────────────────────────
-# OLLAMA API CALL
+# CLAUDE API CALL
 # ─────────────────────────────────────────────
 
-def ask_ollama(prompt: str, context: list = None) -> str:
+def ask_claude(prompt: str) -> str:
     """
-    Send a prompt to metatron-qwen via Ollama API.
-    context: list of previous message dicts for multi-turn conversation.
+    Send a prompt to Claude via the Anthropic API.
     Returns the AI response string.
     """
     try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        print(f"\n[*] Sending to Claude ({CLAUDE_MODEL})...")
+        message = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        response = message.content[0].text.strip()
+
+        if not response:
+            return "[!] Claude returned empty response."
+
+        return response
+
+    except Exception as e:
+        error_str = str(e)
+        if "api_key" in error_str.lower() or "authentication" in error_str.lower():
+            return (
+                "[!] Anthropic API key is missing or invalid.\n"
+                "    Set it with: export ANTHROPIC_API_KEY='sk-ant-...'\n"
+                "    Or add it to .env file in the METATRON directory."
+            )
+        if "rate_limit" in error_str.lower():
+            return "[!] Rate limited by Anthropic API. Wait a moment and try again."
+        return f"[!] Claude API error: {e}"
+
+
+# ─────────────────────────────────────────────
+# OLLAMA FALLBACK
+# ─────────────────────────────────────────────
+
+def ask_ollama(prompt: str) -> str:
+    """
+    Send a prompt to a local Ollama model.
+    Used as fallback when USE_OLLAMA=True in config.
+    """
+    try:
+        import requests
         payload = {
-            "model":  MODEL_NAME,
-            "prompt": prompt,
+            "model":  OLLAMA_MODEL,
+            "prompt": f"{SYSTEM_PROMPT}\n\n{prompt}",
             "stream": False,
             "options": {
                 "num_predict": MAX_TOKENS,
-                "temperature": 0.7,
+                "temperature": TEMPERATURE,
                 "top_p": 0.9,
             }
         }
 
-        print(f"\n[*] Sending to {MODEL_NAME}...")
+        print(f"\n[*] Sending to {OLLAMA_MODEL} (Ollama)...")
         resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
         resp.raise_for_status()
 
@@ -86,17 +128,21 @@ def ask_ollama(prompt: str, context: list = None) -> str:
 
         if not response:
             return "[!] Model returned empty response."
-
         return response
 
-    except requests.exceptions.ConnectionError:
-        return "[!] Cannot connect to Ollama. Is it running? Try: ollama serve"
-    except requests.exceptions.Timeout:
-        return "[!] Ollama timed out. Model may be loading, try again."
-    except requests.exceptions.HTTPError as e:
-        return f"[!] Ollama HTTP error: {e}"
     except Exception as e:
-        return f"[!] Unexpected error: {e}"
+        return f"[!] Ollama error: {e}"
+
+
+# ─────────────────────────────────────────────
+# UNIFIED ASK FUNCTION
+# ─────────────────────────────────────────────
+
+def ask_ai(prompt: str) -> str:
+    """Route to Claude or Ollama based on config."""
+    if USE_OLLAMA:
+        return ask_ollama(prompt)
+    return ask_claude(prompt)
 
 
 # ─────────────────────────────────────────────
@@ -122,9 +168,7 @@ def extract_tool_calls(response: str) -> list:
 
 
 def run_tool_calls(calls: list) -> str:
-    """
-    Execute all tool/search calls and return combined results string.
-    """
+    """Execute all tool/search calls and return combined results string."""
     if not calls:
         return ""
 
@@ -151,10 +195,7 @@ def run_tool_calls(calls: list) -> str:
 # ─────────────────────────────────────────────
 
 def parse_vulnerabilities(response: str) -> list:
-    """
-    Parse VULN: lines from AI response into dicts.
-    Returns list of vulnerability dicts ready for db.save_vulnerability()
-    """
+    """Parse VULN: lines from AI response into dicts."""
     vulns = []
     lines = response.splitlines()
 
@@ -172,7 +213,6 @@ def parse_vulnerabilities(response: str) -> list:
                 "fix":         ""
             }
 
-            # parse header line: VULN: name | SEVERITY: x | PORT: x | SERVICE: x
             parts = line.split("|")
             for part in parts:
                 part = part.strip()
@@ -185,7 +225,6 @@ def parse_vulnerabilities(response: str) -> list:
                 elif part.startswith("SERVICE:"):
                     vuln["service"] = part.replace("SERVICE:", "").strip()
 
-            # look ahead for DESC: and FIX: lines
             j = i + 1
             while j < len(lines) and j <= i + 5:
                 next_line = lines[j].strip()
@@ -204,10 +243,7 @@ def parse_vulnerabilities(response: str) -> list:
 
 
 def parse_exploits(response: str) -> list:
-    """
-    Parse EXPLOIT: lines from AI response into dicts.
-    Returns list of exploit dicts ready for db.save_exploit()
-    """
+    """Parse EXPLOIT: lines from AI response into dicts."""
     exploits = []
     lines = response.splitlines()
 
@@ -271,7 +307,7 @@ def analyse_target(target: str, raw_scan: str) -> dict:
     """
     Full analysis pipeline:
     1. Build initial prompt with scan data
-    2. Send to metatron-qwen
+    2. Send to Claude (or Ollama)
     3. Run tool dispatch loop if AI requests tools
     4. Parse structured output
     5. Return everything ready for db.py to save
@@ -286,23 +322,20 @@ def analyse_target(target: str, raw_scan: str) -> dict:
     """
 
     # ── Step 1: initial prompt ──────────────────
-    initial_prompt = f"""{SYSTEM_PROMPT}
-
-TARGET: {target}
+    initial_prompt = f"""TARGET: {target}
 
 RECON DATA:
 {raw_scan}
 
 Analyze this target completely. Use [TOOL:] or [SEARCH:] if you need more information.
-List all vulnerabilities, fixes, and suggest exploits where applicable.
-"""
+List all vulnerabilities, fixes, and suggest exploits where applicable."""
 
-    full_conversation = initial_prompt
-    final_response    = ""
+    conversation_context = initial_prompt
+    final_response       = ""
 
     # ── Step 2: tool dispatch loop ──────────────
     for loop in range(MAX_TOOL_LOOPS):
-        response = ask_ollama(full_conversation)
+        response = ask_ai(conversation_context)
 
         print(f"\n{'─'*60}")
         print(f"[METATRON - Round {loop + 1}]")
@@ -321,8 +354,8 @@ List all vulnerabilities, fixes, and suggest exploits where applicable.
         tool_results = run_tool_calls(tool_calls)
 
         # feed results back into conversation
-        full_conversation = (
-            f"{full_conversation}\n\n"
+        conversation_context = (
+            f"{conversation_context}\n\n"
             f"[YOUR PREVIOUS RESPONSE]\n{response}\n\n"
             f"[TOOL RESULTS]\n{tool_results}\n\n"
             f"Continue your analysis with this new information. "
@@ -348,19 +381,61 @@ List all vulnerabilities, fixes, and suggest exploits where applicable.
 
 
 # ─────────────────────────────────────────────
+# INTERACTIVE CHAT (post-scan follow-up)
+# ─────────────────────────────────────────────
+
+def chat_about_scan(target: str, scan_data: str, ai_analysis: str):
+    """
+    Let the user ask follow-up questions about a completed scan.
+    Maintains conversation context.
+    """
+    context = f"""You previously analyzed target {target}.
+
+Here is the scan data:
+{scan_data[:3000]}
+
+Here is your analysis:
+{ai_analysis[:3000]}
+
+The user wants to ask follow-up questions. Answer precisely and technically."""
+
+    print("\n\033[94m[*] Chat mode — ask questions about this scan. Type 'exit' to quit.\033[0m")
+
+    while True:
+        question = input("\n\033[36mmetatron-chat> \033[0m").strip()
+        if not question or question.lower() in ("exit", "quit", "back"):
+            break
+
+        full_prompt = f"{context}\n\nUser question: {question}"
+        response = ask_ai(full_prompt)
+        print(f"\n{response}")
+
+        # Update context with this exchange
+        context += f"\n\nUser: {question}\nAssistant: {response}"
+
+
+# ─────────────────────────────────────────────
 # QUICK TEST
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("[ llm.py test — direct AI query ]\n")
 
-    # test if ollama is reachable
-    try:
-        r = requests.get("http://localhost:11434", timeout=5)
-        print("[+] Ollama is running.")
-    except Exception:
-        print("[!] Ollama not reachable. Run: ollama serve")
-        exit(1)
+    if USE_OLLAMA:
+        print("[*] Using Ollama (local)")
+        try:
+            import requests
+            r = requests.get("http://localhost:11434", timeout=5)
+            print("[+] Ollama is running.")
+        except Exception:
+            print("[!] Ollama not reachable. Run: ollama serve")
+            exit(1)
+    else:
+        print("[*] Using Claude API")
+        if not ANTHROPIC_API_KEY:
+            print("[!] No API key set. Run: export ANTHROPIC_API_KEY='sk-ant-...'")
+            exit(1)
+        print("[+] API key found.")
 
     target = input("Test target: ").strip()
     test_scan = f"Test recon for {target} — nmap and whois data would appear here."

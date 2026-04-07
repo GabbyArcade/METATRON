@@ -214,3 +214,8 @@ exports/
 venv/
 __pycache__/
 *.pyc
+
+# v2 additions
+*.db
+*.db-journal
+.env
