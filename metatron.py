@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """
 METATRON - metatron.py
-Main CLI entry point. Wires db.py + tools.py + search.py + llm.py together.
+Main CLI entry point. Wires config + db + tools + search + llm together.
 Run with: python metatron.py
+
+v2 — SQLite + Claude API + expanded tools + security hardening
 """
+
 from export import export_menu
 import os
 import sys
+from config import (
+    ANTHROPIC_API_KEY, USE_OLLAMA, CLAUDE_MODEL, OLLAMA_MODEL,
+    validate_target
+)
 from db import (
-    get_connection,
+    init_db,
     create_session,
     save_vulnerability,
     save_fix,
@@ -30,8 +37,8 @@ from db import (
     print_history,
     print_session
 )
-from tools import interactive_tool_run, format_recon_for_llm, run_default_recon
-from llm import analyse_target
+from tools import interactive_tool_run, format_recon_for_llm, run_default_recon, check_tools
+from llm import analyse_target, chat_about_scan
 
 
 # ─────────────────────────────────────────────
@@ -40,7 +47,13 @@ from llm import analyse_target
 
 def banner():
     os.system("clear")
-    print("""
+
+    if USE_OLLAMA:
+        model_info = f"Model: {OLLAMA_MODEL} (Ollama)"
+    else:
+        model_info = f"Model: {CLAUDE_MODEL} (Anthropic)"
+
+    print(f"""
 \033[91m
     ███╗   ███╗███████╗████████╗ █████╗ ████████╗██████╗  ██████╗ ███╗   ██╗
     ████╗ ████║██╔════╝╚══██╔══╝██╔══██╗╚══██╔══╝██╔══██╗██╔═══██╗████╗  ██║
@@ -49,7 +62,8 @@ def banner():
     ██║ ╚═╝ ██║███████╗   ██║   ██║  ██║   ██║   ██║  ██║╚██████╔╝██║ ╚████║
     ╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 \033[0m
-    \033[90mAI Penetration Testing Assistant  |  Model: metatron-qwen  |  Parrot OS\033[0m
+    \033[90mAI Penetration Testing Assistant  |  {model_info}\033[0m
+    \033[90mDB: SQLite  |  Kali Linux\033[0m
     \033[90m─────────────────────────────────────────────────────────────────────\033[0m
 """)
 
@@ -78,7 +92,7 @@ def warn(text):
 
 
 def error(text):
-    print(f"\033[91m[✗] {text}\033[0m")
+    print(f"\033[91m[x] {text}\033[0m")
 
 
 def info(text):
@@ -99,6 +113,12 @@ def new_scan():
     target = prompt("[?] Enter target IP or domain: ")
     if not target:
         warn("No target entered.")
+        return
+
+    # Validate target
+    if not validate_target(target):
+        error(f"Invalid target format: '{target}'")
+        warn("Enter a valid IP address (e.g. 192.168.1.1) or domain (e.g. example.com)")
         return
 
     # check if target was scanned before
@@ -171,6 +191,10 @@ def new_scan():
     data = get_session(sl_no)
     print_session(data)
 
+    # offer chat follow-up
+    if confirm("Chat with AI about this scan?"):
+        chat_about_scan(target, raw_scan, result["full_response"])
+
     if confirm("Edit or delete anything in this session?"):
         edit_delete_menu(sl_no)
 
@@ -209,6 +233,12 @@ def view_history():
     if confirm("Export this session?"):
         export_menu(data)
 
+    if confirm("Chat with AI about this scan?"):
+        summary = data["summary"]
+        raw = summary[2] if summary else ""
+        ai  = summary[3] if summary else ""
+        chat_about_scan(data["history"][1], raw, ai)
+
     if confirm("Edit or delete anything in this session?"):
         edit_delete_menu(sl_no)
 
@@ -233,68 +263,55 @@ def edit_delete_menu(sl_no: int):
 
         choice = prompt("Choice: ")
 
-        # ── EDIT VULNERABILITY ─────────────────
         if choice == "1":
             vulns = get_vulnerabilities(sl_no)
             if not vulns:
                 warn("No vulnerabilities recorded for this session.")
                 continue
-
             print("\n[ VULNERABILITIES ]")
             for v in vulns:
                 print(f"  id={v[0]} | {v[2]} | {v[3]} | port {v[4]} | {v[5]}")
-
             vid = prompt("Enter vulnerability id to edit: ")
             if not vid.isdigit():
                 error("Invalid id.")
                 continue
-
             print("  Fields: vuln_name / severity / port / service / description")
             field = prompt("Field to edit: ").strip()
             value = prompt(f"New value for '{field}': ")
             edit_vulnerability(int(vid), field, value)
 
-        # ── EDIT FIX ──────────────────────────
         elif choice == "2":
             fixes = get_fixes(sl_no)
             if not fixes:
                 warn("No fixes recorded for this session.")
                 continue
-
             print("\n[ FIXES ]")
             for f in fixes:
                 print(f"  id={f[0]} | vuln_id={f[2]} | {f[3][:80]}")
-
             fid = prompt("Enter fix id to edit: ")
             if not fid.isdigit():
                 error("Invalid id.")
                 continue
-
             new_text = prompt("New fix text: ")
             edit_fix(int(fid), new_text)
 
-        # ── EDIT EXPLOIT ──────────────────────
         elif choice == "3":
             exploits = get_exploits(sl_no)
             if not exploits:
                 warn("No exploits recorded for this session.")
                 continue
-
             print("\n[ EXPLOITS ]")
             for e in exploits:
                 print(f"  id={e[0]} | {e[2]} | tool: {e[3]} | result: {e[5]}")
-
             eid = prompt("Enter exploit id to edit: ")
             if not eid.isdigit():
                 error("Invalid id.")
                 continue
-
             print("  Fields: exploit_name / tool_used / payload / result / notes")
             field = prompt("Field to edit: ").strip()
             value = prompt(f"New value for '{field}': ")
             edit_exploit(int(eid), field, value)
 
-        # ── EDIT RISK LEVEL ───────────────────
         elif choice == "4":
             print("  Options: CRITICAL / HIGH / MEDIUM / LOW")
             risk = prompt("New risk level: ").upper()
@@ -303,91 +320,86 @@ def edit_delete_menu(sl_no: int):
                 continue
             edit_summary_risk(sl_no, risk)
 
-        # ── DELETE VULNERABILITY ──────────────
         elif choice == "5":
             vulns = get_vulnerabilities(sl_no)
             if not vulns:
                 warn("No vulnerabilities to delete.")
                 continue
-
             print("\n[ VULNERABILITIES ]")
             for v in vulns:
                 print(f"  id={v[0]} | {v[2]} | {v[3]}")
-
             vid = prompt("Enter vulnerability id to delete: ")
             if not vid.isdigit():
                 error("Invalid id.")
                 continue
-
             if confirm(f"Delete vulnerability id={vid} and its linked fixes?"):
                 delete_vulnerability(int(vid))
 
-        # ── DELETE FIX ────────────────────────
         elif choice == "6":
             fixes = get_fixes(sl_no)
             if not fixes:
                 warn("No fixes to delete.")
                 continue
-
             print("\n[ FIXES ]")
             for f in fixes:
                 print(f"  id={f[0]} | vuln_id={f[2]} | {f[3][:80]}")
-
             fid = prompt("Enter fix id to delete: ")
             if not fid.isdigit():
                 error("Invalid id.")
                 continue
-
             if confirm(f"Delete fix id={fid}?"):
                 delete_fix(int(fid))
 
-        # ── DELETE EXPLOIT ────────────────────
         elif choice == "7":
             exploits = get_exploits(sl_no)
             if not exploits:
                 warn("No exploits to delete.")
                 continue
-
             print("\n[ EXPLOITS ]")
             for e in exploits:
                 print(f"  id={e[0]} | {e[2]} | result: {e[5]}")
-
             eid = prompt("Enter exploit id to delete: ")
             if not eid.isdigit():
                 error("Invalid id.")
                 continue
-
             if confirm(f"Delete exploit id={eid}?"):
                 delete_exploit(int(eid))
 
-        # ── DELETE FULL SESSION ───────────────
         elif choice == "8":
             if confirm(f"\n\033[91mPermanently delete ENTIRE session SL# {sl_no} from all tables?\033[0m"):
                 delete_full_session(sl_no)
                 success(f"Session SL# {sl_no} wiped.")
-                return   # go back to main menu
+                return
 
-        # ── BACK ──────────────────────────────
         elif choice == "9":
             break
-
         else:
             warn("Invalid choice.")
 
 
 # ─────────────────────────────────────────────
-# DB CONNECTION CHECK
+# STARTUP CHECKS
 # ─────────────────────────────────────────────
 
-def check_db():
-    try:
-        conn = get_connection()
-        conn.close()
+def startup_checks() -> bool:
+    """Run all startup checks. Returns True if ready to go."""
+    # DB auto-creates on import, so just check AI
+    if USE_OLLAMA:
+        try:
+            import requests
+            r = requests.get("http://localhost:11434", timeout=5)
+            return True
+        except Exception:
+            error("Ollama not reachable. Run: ollama serve")
+            return False
+    else:
+        if not ANTHROPIC_API_KEY:
+            error("No Anthropic API key found.")
+            error("Set it with: export ANTHROPIC_API_KEY='sk-ant-...'")
+            error("Or create a .env file in the METATRON directory with:")
+            error("  ANTHROPIC_API_KEY=sk-ant-...")
+            return False
         return True
-    except Exception as e:
-        error(f"MariaDB connection failed: {e}")
-        error("Make sure MariaDB is running: sudo systemctl start mariadb")
-        return False
 
 
 # ─────────────────────────────────────────────
@@ -399,7 +411,8 @@ def main_menu():
         banner()
         print("  \033[92m[1]\033[0m  New Scan")
         print("  \033[92m[2]\033[0m  View History")
-        print("  \033[92m[3]\033[0m  Exit")
+        print("  \033[92m[3]\033[0m  Tool Status")
+        print("  \033[92m[4]\033[0m  Exit")
         divider()
 
         choice = prompt("metatron> ")
@@ -413,6 +426,10 @@ def main_menu():
             input("\n\033[90mPress Enter to continue...\033[0m")
 
         elif choice == "3":
+            check_tools()
+            input("\n\033[90mPress Enter to continue...\033[0m")
+
+        elif choice == "4":
             print("\n\033[91m[*] Shutting down Metatron. Stay legal.\033[0m\n")
             sys.exit(0)
 
@@ -425,6 +442,6 @@ def main_menu():
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not check_db():
+    if not startup_checks():
         sys.exit(1)
     main_menu()
