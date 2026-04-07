@@ -147,29 +147,168 @@ def run_enum4linux(target: str) -> str:
 
 
 # ─────────────────────────────────────────────
+# v2.1 — OSINT / WEB ARSENAL
+# ─────────────────────────────────────────────
+
+def _strip_target(target: str) -> str:
+    """Strip http(s):// scheme + path from target — leaves bare host."""
+    t = target.strip()
+    if t.startswith("http://"):
+        t = t[7:]
+    elif t.startswith("https://"):
+        t = t[8:]
+    return t.split("/")[0].split(":")[0]
+
+
+def _resolve_binary(*candidates: str) -> str:
+    """Return first installed binary from candidates (handles tool aliases)."""
+    for c in candidates:
+        if shutil.which(c):
+            return c
+    return candidates[0]  # fallback — will produce a clean "not found" error
+
+
+def run_nuclei(target: str) -> str:
+    """nuclei — modern vuln scanner with 7000+ templates (CAUTION: actively probes)"""
+    url = target if target.startswith("http") else f"https://{_strip_target(target)}"
+    print(f"  [*] nuclei -u {url} -severity low,medium,high,critical -silent")
+    return run_tool([
+        "nuclei", "-u", url,
+        "-severity", "low,medium,high,critical",
+        "-silent", "-nc", "-timeout", "10",
+        "-rate-limit", "50",
+    ], timeout=TOOL_TIMEOUTS.get("nuclei", 600))
+
+
+def run_httpx(target: str) -> str:
+    """httpx — fast HTTP probing & fingerprinting (projectdiscovery)"""
+    binary = _resolve_binary("httpx-toolkit", "httpx")
+    host = _strip_target(target)
+    print(f"  [*] {binary} -u {host} -title -sc -tech-detect -ip -cdn")
+    return run_tool([
+        binary, "-u", host,
+        "-title", "-status-code", "-tech-detect",
+        "-ip", "-cdn", "-silent",
+    ], timeout=TOOL_TIMEOUTS.get("httpx", 120))
+
+
+def run_dnsx(target: str) -> str:
+    """dnsx — fast DNS resolver (projectdiscovery)"""
+    host = _strip_target(target)
+    print(f"  [*] dnsx -d {host} -a -aaaa -cname -mx -ns -txt -resp")
+    return run_tool([
+        "dnsx", "-d", host,
+        "-a", "-aaaa", "-cname", "-mx", "-ns", "-txt",
+        "-resp", "-silent",
+    ], timeout=TOOL_TIMEOUTS.get("dnsx", 120))
+
+
+def run_amass(target: str) -> str:
+    """amass enum -passive — deep passive subdomain enumeration"""
+    host = _strip_target(target)
+    print(f"  [*] amass enum -passive -d {host}")
+    return run_tool([
+        "amass", "enum", "-passive", "-d", host, "-silent",
+    ], timeout=TOOL_TIMEOUTS.get("amass", 300))
+
+
+def run_theharvester(target: str) -> str:
+    """theHarvester — emails, employees, subdomains from public sources"""
+    binary = _resolve_binary("theHarvester", "theharvester")
+    host = _strip_target(target)
+    print(f"  [*] {binary} -d {host} -b duckduckgo,crtsh,bing -l 200")
+    return run_tool([
+        binary, "-d", host,
+        "-b", "duckduckgo,crtsh,bing,hackertarget",
+        "-l", "200",
+    ], timeout=TOOL_TIMEOUTS.get("theHarvester", 180))
+
+
+def run_wafw00f(target: str) -> str:
+    """wafw00f — WAF detection"""
+    url = target if target.startswith("http") else f"https://{_strip_target(target)}"
+    print(f"  [*] wafw00f {url}")
+    return run_tool(["wafw00f", url], timeout=TOOL_TIMEOUTS.get("wafw00f", 60))
+
+
+def run_ffuf(target: str) -> str:
+    """ffuf — fast modern fuzzer (directory discovery)"""
+    wordlist = "/usr/share/wordlists/dirb/common.txt"
+    url = target if target.startswith("http") else f"http://{_strip_target(target)}"
+    fuzz_url = f"{url.rstrip('/')}/FUZZ"
+    print(f"  [*] ffuf -u {fuzz_url} -w common.txt -mc 200,204,301,302,307,401,403")
+    return run_tool([
+        "ffuf", "-u", fuzz_url, "-w", wordlist,
+        "-mc", "200,204,301,302,307,401,403",
+        "-t", "40", "-s",
+    ], timeout=TOOL_TIMEOUTS.get("ffuf", 300))
+
+
+def run_sqlmap(target: str) -> str:
+    """sqlmap — SQLi automation (CAUTION: defaults to non-destructive crawl, level 1)"""
+    url = target if target.startswith("http") else f"http://{_strip_target(target)}"
+    print(f"  [*] sqlmap -u {url} --batch --crawl=1 --level=1 --risk=1 --random-agent")
+    return run_tool([
+        "sqlmap", "-u", url,
+        "--batch", "--crawl=1", "--level=1", "--risk=1",
+        "--random-agent", "--timeout=10", "--retries=1",
+        "--technique=BEU",
+    ], timeout=TOOL_TIMEOUTS.get("sqlmap", 600))
+
+
+def run_wpscan(target: str) -> str:
+    """wpscan — WordPress vulnerability scanner"""
+    url = target if target.startswith("http") else f"https://{_strip_target(target)}"
+    print(f"  [*] wpscan --url {url} --random-user-agent --no-banner")
+    return run_tool([
+        "wpscan", "--url", url,
+        "--random-user-agent", "--no-banner",
+        "--disable-tls-checks",
+    ], timeout=TOOL_TIMEOUTS.get("wpscan", 300))
+
+
+# ─────────────────────────────────────────────
 # TOOL REGISTRY
 # ─────────────────────────────────────────────
 
 TOOLS_MENU = {
+    # Core recon
     "1":  ("nmap",          run_nmap),
     "2":  ("whois",         run_whois),
     "3":  ("whatweb",       run_whatweb),
     "4":  ("curl headers",  run_curl_headers),
     "5":  ("dig DNS",       run_dig),
+    # Web vuln
     "6":  ("nikto",         run_nikto),
     "7":  ("sslscan",       run_sslscan),
     "8":  ("gobuster",      run_gobuster),
+    # Subdomain
     "9":  ("subfinder",     run_subfinder),
+    # Misc
     "10": ("searchsploit",  run_searchsploit),
     "11": ("enum4linux",    run_enum4linux),
+    # ─── v2.1 OSINT / WEB ARSENAL ───
+    "12": ("nuclei",        run_nuclei),
+    "13": ("httpx",         run_httpx),
+    "14": ("dnsx",          run_dnsx),
+    "15": ("amass",         run_amass),
+    "16": ("theHarvester",  run_theharvester),
+    "17": ("wafw00f",       run_wafw00f),
+    "18": ("ffuf",          run_ffuf),
+    "19": ("sqlmap",        run_sqlmap),
+    "20": ("wpscan",        run_wpscan),
 }
 
 # Tool profiles — pre-built combos
 TOOL_PROFILES = {
-    "quick":    ["1", "2", "4", "5"],           # nmap, whois, curl, dig
-    "web":      ["1", "3", "4", "6", "7", "8"], # + whatweb, nikto, ssl, gobuster
-    "full":     ["1", "2", "3", "4", "5", "7", "9"],  # everything except noisy
-    "internal": ["1", "4", "11"],                # nmap, curl, enum4linux
+    # Core
+    "quick":    ["1", "2", "4", "5"],                                    # nmap, whois, curl, dig
+    "web":      ["3", "4", "7", "13", "17", "12", "6"],                  # whatweb, curl, ssl, httpx, wafw00f, nuclei, nikto
+    "full":     ["1", "2", "3", "4", "5", "7", "9", "13", "15"],         # everything passive-ish
+    "internal": ["1", "4", "11"],                                         # nmap, curl, enum4linux
+    # v2.1 — new bundles
+    "osint":    ["2", "5", "9", "15", "16", "14", "13"],                 # whois, dig, subfinder, amass, theHarvester, dnsx, httpx
+    "bug":      ["9", "15", "13", "17", "12", "18"],                     # subfinder, amass, httpx, wafw00f, nuclei, ffuf
 }
 
 
@@ -194,6 +333,15 @@ def run_default_recon(target: str) -> dict:
     return results
 
 
+def _menu_binary(name: str) -> str:
+    """Resolve menu name to actual binary for which() checks."""
+    if name == "curl headers":   return "curl"
+    if name == "dig DNS":        return "dig"
+    if name == "theHarvester":   return _resolve_binary("theHarvester", "theharvester")
+    if name == "httpx":          return _resolve_binary("httpx-toolkit", "httpx")
+    return name.split()[0]
+
+
 def run_profile(profile_name: str, target: str) -> dict:
     """Run a named tool profile."""
     keys = TOOL_PROFILES.get(profile_name, [])
@@ -201,7 +349,7 @@ def run_profile(profile_name: str, target: str) -> dict:
     for key in keys:
         if key in TOOLS_MENU:
             name, func = TOOLS_MENU[key]
-            if shutil.which(name.split()[0]) or name in ("curl headers", "dig DNS"):
+            if shutil.which(_menu_binary(name)):
                 print(f"\n[*] Running {name}...")
                 results[name] = func(target)
             else:
@@ -263,16 +411,25 @@ def interactive_tool_run(target: str) -> str:
     """
     print("\n[ SELECT TOOLS TO RUN ]")
     for key, (name, _) in sorted(TOOLS_MENU.items(), key=lambda x: int(x[0])):
-        installed = "+" if shutil.which(name.split()[0]) or name in ("curl headers", "dig DNS") else "-"
-        print(f"  [{key:>2}] {name:<16} [{installed}]")
+        binary = name.split()[0]
+        if name == "curl headers": binary = "curl"
+        elif name == "dig DNS":    binary = "dig"
+        elif name == "theHarvester": binary = _resolve_binary("theHarvester", "theharvester")
+        elif name == "httpx":      binary = _resolve_binary("httpx-toolkit", "httpx")
+        installed = "+" if shutil.which(binary) else "-"
+        caution = " !" if binary in {"nikto", "sqlmap", "hydra", "masscan", "gobuster", "ffuf", "wpscan", "nuclei"} else "  "
+        print(f"  [{key:>2}]{caution} {name:<14} [{installed}]")
     print()
     print("  [a]  Run all (except noisy tools)")
-    print("  [q]  Quick scan (nmap + whois + curl + dig)")
-    print("  [w]  Web scan (nmap + whatweb + curl + nikto + ssl + gobuster)")
-    print("  [f]  Full scan (everything except noisy)")
-    print("  [i]  Internal network (nmap + curl + enum4linux)")
+    print("  [q]  Quick     — nmap + whois + curl + dig                       (~30s)")
+    print("  [w]  Web       — whatweb + curl + ssl + httpx + wafw00f + nuclei + nikto")
+    print("  [o]  OSINT     — whois + dig + subfinder + amass + theHarvester + dnsx + httpx")
+    print("  [b]  Bug bnty  — subfinder + amass + httpx + wafw00f + nuclei + ffuf")
+    print("  [f]  Full      — kitchen sink (passive-ish)")
+    print("  [i]  Internal  — nmap + curl + enum4linux")
+    print("  ! = active/noisy — generates traffic to target")
 
-    choice = input("\nChoice(s) e.g. 1 2 4 or a: ").strip().lower()
+    choice = input("\nChoice(s) e.g. 1 2 4 or a/q/w/o/b/f/i: ").strip().lower()
 
     if choice == "a":
         results = run_default_recon(target)
@@ -283,7 +440,10 @@ def interactive_tool_run(target: str) -> str:
         return format_recon_for_llm(results)
 
     # Map single-letter shortcuts
-    profile_map = {"q": "quick", "w": "web", "f": "full", "i": "internal"}
+    profile_map = {
+        "q": "quick", "w": "web", "f": "full", "i": "internal",
+        "o": "osint", "b": "bug",
+    }
     if choice in profile_map:
         results = run_profile(profile_map[choice], target)
         return format_recon_for_llm(results)
@@ -307,17 +467,28 @@ def interactive_tool_run(target: str) -> str:
 def check_tools():
     """Print status of all recon tools."""
     print("\n[ TOOL STATUS ]")
-    print("─" * 40)
+    print("─" * 50)
+    install_hints = {
+        "nuclei":       "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest  (or apt install nuclei)",
+        "httpx":        "apt install httpx-toolkit",
+        "dnsx":         "go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest",
+        "theHarvester": "apt install theharvester",
+        "wafw00f":      "apt install wafw00f",
+        "amass":        "apt install amass",
+        "wpscan":       "apt install wpscan",
+        "ffuf":         "apt install ffuf",
+        "sqlmap":       "apt install sqlmap",
+    }
     for key, (name, _) in sorted(TOOLS_MENU.items(), key=lambda x: int(x[0])):
-        # Get the actual binary name
-        binary = name.split()[0]
-        if name == "curl headers":
-            binary = "curl"
-        elif name == "dig DNS":
-            binary = "dig"
+        binary = _menu_binary(name)
         installed = shutil.which(binary) is not None
-        status = "\033[92m INSTALLED \033[0m" if installed else "\033[91m MISSING   \033[0m"
-        print(f"  {name:<16} {status}")
+        if installed:
+            status = "\033[92m INSTALLED \033[0m"
+            hint = ""
+        else:
+            status = "\033[91m MISSING   \033[0m"
+            hint = "  → " + install_hints.get(name, f"apt install {binary}")
+        print(f"  [{key:>2}] {name:<14} {status}{hint}")
     print()
 
 

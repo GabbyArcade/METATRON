@@ -55,18 +55,39 @@ REPORT_DIR  = os.path.join(BASE_DIR, "reports")
 # ─────────────────────────────────────────────
 
 ALLOWED_TOOLS = {
-    "nmap", "whois", "whatweb", "curl", "dig", "nikto",
-    "gobuster", "ffuf", "subfinder", "amass",
+    # Core recon
+    "nmap", "whois", "whatweb", "curl", "dig", "host",
+    "ping", "traceroute",
+    # Web vuln scanning
+    "nikto", "nuclei", "wpscan", "sqlmap",
+    # Fuzzing / brute
+    "gobuster", "ffuf",
+    # Subdomain / OSINT
+    "subfinder", "amass", "theHarvester", "theharvester",
+    # HTTP probing
+    "httpx", "httpx-toolkit",
+    # DNS at scale
+    "dnsx",
+    # WAF detection
+    "wafw00f",
+    # SSL / TLS
     "sslscan", "testssl.sh", "testssl",
-    "enum4linux", "masscan",
-    "wpscan", "sqlmap",
+    # SMB / Windows
+    "enum4linux", "smbmap", "smbclient",
+    # Port scanning
+    "masscan", "rustscan",
+    # Exploit DB
     "searchsploit",
+    # Cred testing (CAUTION)
     "hydra",
-    "ping", "traceroute", "host",
 }
 
-# Tools that are dangerous / noisy — require explicit confirmation
-CAUTION_TOOLS = {"nikto", "sqlmap", "hydra", "masscan", "gobuster", "ffuf"}
+# Tools that are dangerous / noisy / generate traffic — flag in UI
+CAUTION_TOOLS = {
+    "nikto", "sqlmap", "hydra", "masscan", "gobuster", "ffuf",
+    "wpscan",  # active enumeration of WP
+    "nuclei",  # actively probes targets
+}
 
 
 # ─────────────────────────────────────────────
@@ -74,14 +95,23 @@ CAUTION_TOOLS = {"nikto", "sqlmap", "hydra", "masscan", "gobuster", "ffuf"}
 # ─────────────────────────────────────────────
 
 TOOL_TIMEOUTS = {
-    "nmap":       300,
-    "nikto":      600,
-    "masscan":    120,
-    "gobuster":   300,
-    "ffuf":       300,
-    "sqlmap":     600,
-    "hydra":      300,
-    "default":    120,
+    "nmap":         300,
+    "nikto":        600,
+    "masscan":      120,
+    "gobuster":     300,
+    "ffuf":         300,
+    "sqlmap":       600,
+    "hydra":        300,
+    "nuclei":       600,
+    "wpscan":       300,
+    "amass":        300,
+    "theHarvester": 180,
+    "theharvester": 180,
+    "httpx":        120,
+    "httpx-toolkit":120,
+    "dnsx":         120,
+    "wafw00f":      60,
+    "default":      120,
 }
 
 
